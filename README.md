@@ -13,9 +13,9 @@ seed priors ─→ ┌─ explore ─ read ─ audit ─ assess ─┐ ─→ ci
 > **Status: under active development.** Prompts, knobs and telemetry change frequently — pin a commit
 > if you need stability.
 
-## Why not the built-in deep research
+## The built-in pipeline
 
-Read out of the built-in pipeline's source and measured on live runs, as shipped at the time of writing:
+Four problems, read out of its source and measured on live runs, as shipped at the time of writing:
 
 - **One pass.** The report schema has an `openQuestions` field and the synthesis agent fills it — then
   the workflow returns. Discoveries never become new searches.
@@ -26,7 +26,7 @@ Read out of the built-in pipeline's source and measured on live runs, as shipped
 - **Uncapped cost.** The fan-out reaches 97 agents by construction (96 measured on one question), and
   about three quarters of them are verification votes.
 
-## What this does instead
+## What this does
 
 - **A belief about the answer, updated every round.** An assessor restates the current best answer,
   states what would change it, and aims the next round at exactly that. It can settle early — and the
