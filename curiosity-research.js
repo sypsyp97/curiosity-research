@@ -1099,6 +1099,10 @@ const report = await agent(
 // parsed back, so the check below routes to the raw-claim salvage instead of shipping
 // a silently empty report.
 unswallow(report, 'answer')
+// Keep the returned shape stable now that `findings` is not required: absent and empty are
+// the same thing to the check below, but a missing key would reach the caller as a silently
+// absent field rather than an honestly empty list.
+if (report && !Array.isArray(report.findings)) report.findings = []
 if (report && !report.caveats) report.caveats = 'The synthesis output carried no caveats field. ' +
   'Harness counts: ' + audited.length + ' of ' + (surviving.length + killedClaims.length) +
   ' claims were checked against their cited source.'
