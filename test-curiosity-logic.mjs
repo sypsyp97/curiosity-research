@@ -278,4 +278,67 @@ chk('no truncation prints one number', header(new Array(12).fill(0)) === '12')
 chk('truncation declares both numbers', header(new Array(63).fill(0)) === '40 shown of 63; the 23 omitted')
 chk('exactly at the cap does not claim truncation', header(new Array(40).fill(0)) === '40')
 
+// ── swallowed-parameter recovery (copied from curiosity-research.js)
+// A long value closed with `</answer>` instead of `</parameter>` makes the tool parser eat
+// that tag and the NEXT parameter into the string. The observed case lost `confidence`, and
+// the framework's "missing required property" retry drove the model to stub out `answer`.
+const asValue = v => {
+  if (v === 'true') return true
+  if (v === 'false') return false
+  if (/^[[{]/.test(v)) { try { return JSON.parse(v) } catch { return undefined } }
+  return v
+}
+const unswallow = (obj, field) => {
+  if (!obj || typeof obj[field] !== 'string') return obj
+  // The remainder must be empty or start with `<parameter`, which is what keeps a
+  // stray `</answer>` inside prose from truncating a legitimate answer.
+  const m = obj[field].match(new RegExp('</' + field + '>\\s*((?:<parameter\\b[\\s\\S]*)?)$', 'i'))
+  if (!m) return obj
+  obj[field] = obj[field].slice(0, m.index).trimEnd()
+  for (const p of m[1].matchAll(
+    /<parameter\s+name=["']?([\w-]+)["']?\s*>([\s\S]*?)(?=\s*<parameter\b|\s*<\/[a-z]|$)/gi)) {
+    const v = asValue(p[2].trim())
+    if (v !== undefined && v !== '' && obj[p[1]] === undefined) obj[p[1]] = v
+  }
+  return obj
+}
+
+// the exact shape measured on a round-3 assessor
+const observed = unswallow({
+  answer: 'The evidence supports keeping four things as-is.</answer>\n<parameter name="confidence">medium',
+  settled: false, gaps: [], disagreements: [],
+}, 'answer')
+chk('swallowed confidence is recovered', observed.confidence === 'medium')
+chk('recovery strips the close tag and the rider off answer',
+    observed.answer === 'The evidence supports keeping four things as-is.', JSON.stringify(observed.answer))
+chk('recovery does not disturb the parameters that parsed fine', observed.settled === false)
+
+chk('a clean answer is returned untouched',
+    unswallow({answer: 'plain text', confidence: 'high'}, 'answer').answer === 'plain text')
+chk('a bare trailing close tag is stripped with nothing to recover',
+    unswallow({answer: 'body</answer>'}, 'answer').answer === 'body')
+chk('a stray close tag inside prose does not truncate the answer',
+    unswallow({answer: 'see </answer> above, then more prose'}, 'answer').answer ===
+      'see </answer> above, then more prose')
+chk('boolean riders are coerced, not left as strings',
+    unswallow({answer: 'x</answer><parameter name="settled">false</parameter>'}, 'answer').settled === false)
+chk('two riders are both recovered', (() => {
+  const o = unswallow({answer: 'x</answer>\n<parameter name="confidence">low</confidence>\n' +
+    '<parameter name="settled">true'}, 'answer')
+  return o.confidence === 'low' && o.settled === true
+})())
+chk('an unparseable array rider is dropped, not stored as a string', (() => {
+  const o = unswallow({answer: 'x</answer><parameter name="findings">[{broken'}, 'answer')
+  return o.findings === undefined
+})())
+chk('a parseable array rider is restored as an array', (() => {
+  const o = unswallow({answer: 'x</answer><parameter name="findings">[{"finding":"a"}]'}, 'answer')
+  return Array.isArray(o.findings) && o.findings[0].finding === 'a'
+})())
+chk('recovery never overwrites a value that arrived intact',
+    unswallow({answer: 'x</answer><parameter name="confidence">low', confidence: 'high'}, 'answer')
+      .confidence === 'high')
+chk('a non-string field is a no-op', unswallow({answer: 42}, 'answer').answer === 42)
+chk('a null result does not throw', unswallow(null, 'answer') === null)
+
 console.log(`\n--- ${p}/${p+f} passed (slot mechanism replaced) ---`); process.exit(f?1:0)

@@ -177,6 +177,41 @@ const safeLabel = (url, title) => {
 const FENCE = '<<<UNTRUSTED-WEB-TEXT'
 const fenced = s => FENCE + '\n' + strip(String(s ?? '')).slice(0, 800) + '\n' + FENCE + '>>>'
 
+// ─── swallowed-parameter recovery ───
+// The tool parser ends a parameter at the first `</parameter>`, so a long value the
+// model closes with a NAME-matched tag instead — `</answer>` — swallows that tag and
+// the parameter after it into the string. Measured on an assessor round: stop_reason
+// `tool_use`, 7.4k output tokens, keys ['answer','settled','gaps','disagreements'],
+// with `confidence` sitting in the tail of `answer` — a wire-format slip, not an
+// output ceiling, so no amount of schema strictness prevents it. Strictness makes it
+// worse: the framework retries with "missing required property 'confidence'", which
+// the model cannot act on because the field IS in its output, and after three tries
+// it satisfies the schema by replacing the long value with a stub and the round is
+// lost. Hence two coupled changes — the swallowable fields are not `required`, so the
+// first attempt validates and arrives here, where what rode along is put back.
+// Recovery only, never invention: absent keys get filled, present ones are kept, and
+// a value that does not parse is dropped rather than guessed at.
+const asValue = v => {
+  if (v === 'true') return true
+  if (v === 'false') return false
+  if (/^[[{]/.test(v)) { try { return JSON.parse(v) } catch { return undefined } }
+  return v
+}
+const unswallow = (obj, field) => {
+  if (!obj || typeof obj[field] !== 'string') return obj
+  // The remainder must be empty or start with `<parameter`, which is what keeps a
+  // stray `</answer>` inside prose from truncating a legitimate answer.
+  const m = obj[field].match(new RegExp('</' + field + '>\\s*((?:<parameter\\b[\\s\\S]*)?)$', 'i'))
+  if (!m) return obj
+  obj[field] = obj[field].slice(0, m.index).trimEnd()
+  for (const p of m[1].matchAll(
+    /<parameter\s+name=["']?([\w-]+)["']?\s*>([\s\S]*?)(?=\s*<parameter\b|\s*<\/[a-z]|$)/gi)) {
+    const v = asValue(p[2].trim())
+    if (v !== undefined && v !== '' && obj[p[1]] === undefined) obj[p[1]] = v
+  }
+  return obj
+}
+
 // ─── schemas ───
 // Kept deliberately shallow: every extra required field is another chance for a
 // small model to satisfy the validator by dropping the hard part. Optional
@@ -250,8 +285,11 @@ const RECONCILE = {
 // The belief state. `wouldChange` is what makes the next round expected-gain
 // driven rather than merely surprise-driven, and `settled` is what lets the run
 // stop early instead of spending its cap because the cap exists.
+// `answer` is the only required field: it is emitted first, and requiring the short
+// scalars that follow it is what turns a swallowed parameter into a discarded round
+// (see unswallow). They are recovered or defaulted at the call site.
 const ASSESS = {
-  type: 'object', required: ['answer', 'confidence', 'settled'],
+  type: 'object', required: ['answer'],
   properties: {
     answer: { type: 'string' },
     confidence: { enum: ['high', 'medium', 'low', 'none'] },
@@ -308,8 +346,12 @@ const AUDIT_BATCH = {
     }},
   },
 }
+// Only `answer` is required, for the reason unswallow documents: `findings` and
+// `caveats` are precisely the fields a swallowed `</answer>` eats, and rejecting the
+// call costs the entire report. An unrecoverable `findings` still routes to the
+// raw-claim salvage below, which is a far better outcome than a stubbed answer.
 const REPORT = {
-  type: 'object', required: ['answer', 'findings', 'caveats'],
+  type: 'object', required: ['answer'],
   properties: {
     answer: { type: 'string' },
     findings: { type: 'array', maxItems: 10, items: {
@@ -880,10 +922,10 @@ for (let round = 1; round <= cfg.rounds; round++) {
     // On the final round `wouldChange`, `disagreements` and `nextEntries` steer a
     // round that will never run, so asking for them buys nothing — and they are
     // the output-heaviest fields, demanded at exactly the point where the evidence
-    // table is largest. Measured: the round-3 assessor hit the structured-output
-    // ceiling and satisfied the schema with answer:"test", so the belief update
-    // was discarded and the report was synthesised from the round-2 answer. The
-    // last round's retrievals never reached the report at all.
+    // table is largest. This trims output; it does NOT stop the round-3 assessor from
+    // returning answer:"test" — that failure was re-measured as a swallowed parameter
+    // (see unswallow), never an output ceiling, and it is fixed there. The earlier
+    // ceiling attribution written here was wrong and the trim aimed at it did nothing.
     const lastRound = round === cfg.rounds || exploreUsed >= exploreCap
     // Cross-references are by field name, never by item number: the numbering
     // shifts when the final-round items are dropped.
@@ -927,6 +969,12 @@ for (let round = 1; round <= cfg.rounds; round++) {
       '## Task\n' + tasks.map((t, i) => (i + 1) + '. ' + t).join('\n') + '\n\n' + RULES,
       { label: 'assess:r' + round, phase: 'Explore', schema: ASSESS, ...cfg.roles.assess }
     )
+    // Put back whatever a swallowed `</answer>` carried off, then default what is
+    // still missing. `settled` defaults false in particular: an assessment whose own
+    // metadata did not survive serialisation is not evidence that the run is done.
+    unswallow(a, 'answer')
+    if (a && a.confidence === undefined) a.confidence = 'low'
+    if (a && a.settled === undefined) a.settled = false
     // The belief update can degenerate exactly like the synthesis does: measured
     // once, the round-3 assessor satisfied the schema with answer:"test", which
     // would have replaced a good working answer with a placeholder and fed it to
@@ -1046,11 +1094,22 @@ const report = await agent(
   { label: 'report', phase: 'Synthesize', schema: REPORT, ...cfg.roles.report }
 )
 
+// Same recovery as the assessor gets: `findings` and `caveats` are what a swallowed
+// `</answer>` eats here. `findings` is deliberately left absent when it cannot be
+// parsed back, so the check below routes to the raw-claim salvage instead of shipping
+// a silently empty report.
+unswallow(report, 'answer')
+if (report && !report.caveats) report.caveats = 'The synthesis output carried no caveats field. ' +
+  'Harness counts: ' + audited.length + ' of ' + (surviving.length + killedClaims.length) +
+  ' claims were checked against their cited source.'
+
 // A schema-valid but EMPTY report is the dangerous case, and testing only for
-// null misses it: measured once on the built-in harness, the synthesiser hit the
-// output ceiling, failed validation three times, then satisfied it with
+// null misses it: measured once on the built-in harness, the synthesiser failed
+// validation three times and then satisfied it with
 // {"summary":"test","findings":[],"caveats":"test"} — a run that had spent its
-// whole budget returned nothing and raised no error anywhere.
+// whole budget returned nothing and raised no error anywhere. That is the same
+// signature the swallowed parameter produces, so unswallow above now repairs the
+// common cause; this stays as the backstop for anything else that empties a report.
 const degenerate = report && surviving.length > 0 && !(report.findings || []).length
 if (degenerate) log('synthesis returned an empty report for ' + surviving.length + ' surviving claims — salvaging raw')
 if (!report || degenerate) {
