@@ -76,7 +76,7 @@ and claims that hold up when you check them.
 ## Tests
 
 ```bash
-node test-curiosity-logic.mjs   # 93 cases
+node test-curiosity-logic.mjs   # 96 cases
 ```
 
 ## Licence
