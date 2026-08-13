@@ -1,5 +1,7 @@
 # curiosity-research
 
+English · [简体中文](README.zh-CN.md)
+
 Curiosity-driven deep research for [Claude Code](https://claude.com/claude-code), in one workflow script.
 The loop maintains a **working answer** to your question and spends its agent budget wherever that
 answer might still change.
@@ -92,7 +94,7 @@ editing the file, restart the session or invoke it by `scriptPath`.
 ## Tests
 
 ```bash
-node test-curiosity-logic.mjs   # 72 cases: ranking, admission, budget arithmetic, audit grouping
+node test-curiosity-logic.mjs   # 80 cases: ranking, admission, budget arithmetic, audit grouping, report rendering
 ```
 
 ## License
