@@ -2,77 +2,70 @@
 
 English · [简体中文](README.zh-CN.md)
 
-Curiosity-driven deep research for [Claude Code](https://claude.com/claude-code), in one workflow script.
-The loop maintains a **working answer** to your question and spends its agent budget wherever that
-answer might still change.
+A deep-research workflow for [Claude Code](https://claude.com/claude-code), in one file.
+
+Ask it a question. It writes down its best answer, then keeps searching wherever that answer
+might still turn out wrong — and stops when more searching stops changing it.
 
 ```
-seed priors ─→ ┌─ explore ─ read ─ audit ─ assess ─┐ ─→ cited report
-               └────── re-aimed each round at ─────┘
-                  whatever would change the answer
+guess ─→ ┌─ search ─ read ─ check ─ rethink ─┐ ─→ report with citations
+         └──── each round aims at what ──────┘
+                could change the answer
 ```
 
-> **Status: under active development.** Prompts, knobs and telemetry change frequently — pin a commit
-> if you need stability.
+> **Under active development.** Prompts and settings change often — pin a commit if you need
+> stability.
 
 ## The built-in pipeline
 
-Four problems, read out of its source and measured on live runs, as shipped at the time of writing:
+Four problems, from reading its source and watching it run:
 
-- **One pass.** The report schema has an `openQuestions` field and the synthesis agent fills it — then
-  the workflow returns. Discoveries never become new searches.
-- **Verification deletes single-source facts.** Verifiers are told to *default to refuted when
-  uncertain*, and two of three votes kill a claim. A default value read out of a repository's config
-  file has exactly one source by nature — it cannot be independently corroborated, so it dies.
-- **No per-domain quota.** Fetch dedup is per-URL, so every fetch slot can land on the same content farm.
-- **Uncapped cost.** The fan-out reaches 97 agents by construction (96 measured on one question), and
-  about three quarters of them are verification votes.
+- **It only searches once.** It ends by listing the open questions it found, and then stops.
+  Nothing it discovers ever becomes a new search.
+- **It deletes facts that only have one source.** Three checkers vote, they are told to assume
+  the worst when unsure, and two votes delete the claim. But a default value read out of a
+  config file only ever has one source, so it gets deleted.
+- **One website can eat the whole budget.** Pages are de-duplicated by URL, not by site.
+- **Cost is unbounded.** It fans out to 97 agents, three quarters of them spent on those
+  verification votes.
 
-## What this does
+## What this one does
 
-- **A belief about the answer, updated every round.** An assessor restates the current best answer,
-  states what would change it, and aims the next round at exactly that. It can settle early — and the
-  harness vetoes "settled" while high-scoring leads, blocking gaps or unresolved conflicts remain.
-- **Curiosity as prediction error.** Every search line writes down what it expects *before* retrieving;
-  surprise is scored as a comparison against that prior (contradicted / beyond / consistent / not
-  addressed), inherited by follow-ups, and cooled with depth:
-  `score = importance × novelty × hostPref × (0.4 + surprise · decay^depth) / cost`.
-  Lines that contradict their prior rise; lines that confirm it sink.
-- **Conflicts jump the queue.** Two detection paths — exact normalized `subject|measure` matching in the
-  harness, plus the assessor, the only role that sees the whole claim table. The reconciler must rule out
-  definition, protocol and version mismatches before calling anything a real conflict.
-- **An audit that points somewhere true.** Claims are mechanically quote-checked against the cited
-  source, grouped one agent per source (opening the page is the cost). Only a quote that is *absent* or
-  a primary-source contradiction kills; weak-source or outdated only downgrades. Negative claims
-  ("X never reports Y") pass by confirming the absence at the source. Killed claims never reach the
-  assessor.
-- **The budget is the contract.** One hard agent cap, enforced before every dispatch. Audit votes are
-  derived from it (coverage before depth), a 60:40 coverage:curiosity split keeps the run answering the
-  question it was asked, and unspent exploration flows back into the audit.
-- **Telemetry that can't flatter itself.** Audit coverage %, new-slots-per-round, degenerate
-  assessments, dropped belief updates, miscited count, and references to the operator's own local notes
-  are all counted and reported. Several of these counters exist because an earlier version misreported
-  its own work.
-- **Built for a cheap model.** Every role is pinned to Sonnet. URLs are assigned by the harness, never
-  recalled by the model; web text enters prompts fenced as data; judgements are posed as comparisons,
-  not feelings.
+- **It keeps a running answer.** Every round it restates its best answer and what would change
+  it, then aims the next round at exactly that. It can finish early, but not while there are
+  strong leads left, known gaps, or two sources that disagree.
+- **It chases surprises.** Before searching, it writes down what it expects to find. Sources
+  that contradict that expectation get followed up first; sources that confirm it sink down the
+  list. A surprise fades as its thread gets dug out, so no single lead can hog the run.
+- **It checks quotes, not vibes.** For every claim it reopens the page that was cited and looks
+  for the sentence. A quote that isn't there is deleted. A source that is merely weak or old
+  only loses confidence. "Nobody reports X" passes by confirming X really is missing at the
+  source.
+- **You set the budget, it respects it.** One number caps the agents. How many checks and how
+  deep are derived from it, and leftover budget goes to more checking.
+- **It reports on itself honestly.** How many claims were checked, how many quotes were wrong,
+  what it dropped for lack of budget. Several of those counters exist because an earlier version
+  got this wrong and quietly overstated its own work.
+- **It assumes a cheap model.** Every agent runs on Sonnet. Each does one job, is handed the URL
+  rather than asked to remember it, and is asked to compare things rather than to judge how it
+  feels about them.
 
 ## Measured
 
-Equal-budget A/B against the built-in pipeline (same 30-agent cap, same model, same question, same day):
+Same question, same day, same 30-agent budget, same model:
 
-|                                    | built-in, capped | curiosity-research |
-|------------------------------------|-----------------:|-------------------:|
-| agents used                        |            29/30 |              30/30 |
-| tokens                             |           1.61 M |             1.78 M |
-| wall clock                         |        **519 s** |             1706 s |
-| sources opened                     | 10 (19 dropped unread) |         **12** |
-| sub-questions answered             |           2 of 4 |         **4 of 4** |
-| findings surviving a manual check  |              1/3 |            **6/8** |
-| citations pointing at the wrong source |            0 |                  0 |
+|                                            |                   built-in |   this |
+|--------------------------------------------|---------------------------:|-------:|
+| agents used                                |                      29/30 |  30/30 |
+| tokens                                     |                     1.61 M | 1.78 M |
+| wall clock                                 |                  **519 s** | 1706 s |
+| pages actually opened                      | 10 (19 skipped for budget) | **12** |
+| sub-questions answered                     |                     2 of 4 | **4 of 4** |
+| findings that held up when checked by hand |                        1/3 | **6/8** |
+| citations pointing at the wrong page       |                          0 |      0 |
 
-At the same cap it is slower and slightly more expensive; that buys coverage and findings that
-survive checking.
+It is slower and slightly dearer for the same budget. What you get back is coverage, and
+findings that survive being checked.
 
 ## Install
 
@@ -82,19 +75,21 @@ curl -fsSL -o ~/.claude/workflows/curiosity-research.js \
   https://raw.githubusercontent.com/sypsyp97/curiosity-research/main/curiosity-research.js
 ```
 
-Start a new Claude Code session and ask:
+Start a new Claude Code session and say:
 
 > Run the curiosity-research workflow on: *your question*
 
-Requires Claude Code with the Workflow tool, WebSearch and WebFetch. Config rides in `args`:
-`agents: 12` is a quick check, `30` the default report, `60` exhaustive; `verify.mode: "kill"`
-reproduces the built-in's majority-refutes audit. Workflow names are cached per session — after
-editing the file, restart the session or invoke it by `scriptPath`.
+Needs Claude Code with the Workflow tool, WebSearch and WebFetch.
+
+Settings go in `args`. `agents: 12` for a quick check, `30` for a normal report, `60` to go
+exhaustive. `verify.mode: "kill"` switches checking back to the built-in's delete-on-doubt
+behaviour. Workflow names are cached per session, so after editing the file, restart the session
+or call it by `scriptPath`.
 
 ## Tests
 
 ```bash
-node test-curiosity-logic.mjs   # 80 cases: ranking, admission, budget arithmetic, audit grouping, report rendering
+node test-curiosity-logic.mjs   # 80 cases
 ```
 
 ## License
