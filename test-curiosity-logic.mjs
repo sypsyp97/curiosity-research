@@ -288,7 +288,7 @@ const asValue = v => {
   if (/^[[{]/.test(v)) { try { return JSON.parse(v) } catch { return undefined } }
   return v
 }
-const unswallow = (obj, field) => {
+const unswallow = (obj, field, recovered) => {
   if (!obj || typeof obj[field] !== 'string') return obj
   // The remainder must be empty or start with `<parameter`, which is what keeps a
   // stray `</answer>` inside prose from truncating a legitimate answer.
@@ -298,7 +298,7 @@ const unswallow = (obj, field) => {
   for (const p of m[1].matchAll(
     /<parameter\s+name=["']?([\w-]+)["']?\s*>([\s\S]*?)(?=\s*<parameter\b|\s*<\/[a-z]|$)/gi)) {
     const v = asValue(p[2].trim())
-    if (v !== undefined && v !== '' && obj[p[1]] === undefined) obj[p[1]] = v
+    if (v !== undefined && v !== '' && obj[p[1]] === undefined) { obj[p[1]] = v; recovered?.push(p[1]) }
   }
   return obj
 }
@@ -340,5 +340,17 @@ chk('recovery never overwrites a value that arrived intact',
       .confidence === 'high')
 chk('a non-string field is a no-op', unswallow({answer: 42}, 'answer').answer === 42)
 chk('a null result does not throw', unswallow(null, 'answer') === null)
+
+// a repair in a live run has to be countable, or a green run cannot be told apart from a run
+// where the slip simply never happened
+const sink = []
+unswallow({answer: 'x</answer><parameter name="confidence">medium'}, 'answer', sink)
+chk('a repair reports which keys it put back', sink.length === 1 && sink[0] === 'confidence')
+const quiet = []
+unswallow({answer: 'nothing wrong here'}, 'answer', quiet)
+chk('a clean answer reports no repair', quiet.length === 0)
+const kept = []
+unswallow({answer: 'x</answer><parameter name="confidence">low', confidence: 'high'}, 'answer', kept)
+chk('a value that arrived intact is not counted as recovered', kept.length === 0)
 
 console.log(`\n--- ${p}/${p+f} passed (slot mechanism replaced) ---`); process.exit(f?1:0)

@@ -197,7 +197,10 @@ const asValue = v => {
   if (/^[[{]/.test(v)) { try { return JSON.parse(v) } catch { return undefined } }
   return v
 }
-const unswallow = (obj, field) => {
+// `recovered` is an optional sink for the key names put back, so a repair in a live run
+// is counted rather than silent — without it there is no way to tell "the fix worked" from
+// "the slip did not happen", which is the only question a verification run can answer.
+const unswallow = (obj, field, recovered) => {
   if (!obj || typeof obj[field] !== 'string') return obj
   // The remainder must be empty or start with `<parameter`, which is what keeps a
   // stray `</answer>` inside prose from truncating a legitimate answer.
@@ -207,7 +210,7 @@ const unswallow = (obj, field) => {
   for (const p of m[1].matchAll(
     /<parameter\s+name=["']?([\w-]+)["']?\s*>([\s\S]*?)(?=\s*<parameter\b|\s*<\/[a-z]|$)/gi)) {
     const v = asValue(p[2].trim())
-    if (v !== undefined && v !== '' && obj[p[1]] === undefined) obj[p[1]] = v
+    if (v !== undefined && v !== '' && obj[p[1]] === undefined) { obj[p[1]] = v; recovered?.push(p[1]) }
   }
   return obj
 }
@@ -428,6 +431,7 @@ let stallCount = 0               // TOTAL stalls; `stale` is only the live strea
 const newSlotsTrace = []         // new slots per round — makes "stalls: 0" checkable
 let roundsRun = 0                // rounds actually executed, NOT assessments accepted
 let degenerateAssessments = 0    // belief updates thrown away for being placeholders
+let parametersRecovered = 0      // parameters put back after a swallowed close tag ate them
 let pivotNote = ''               // set when a stall forces a structural change
 let working = null              // latest ASSESS result
 let droppedUnsourced = 0
@@ -972,7 +976,12 @@ for (let round = 1; round <= cfg.rounds; round++) {
     // Put back whatever a swallowed `</answer>` carried off, then default what is
     // still missing. `settled` defaults false in particular: an assessment whose own
     // metadata did not survive serialisation is not evidence that the run is done.
-    unswallow(a, 'answer')
+    const put = []
+    unswallow(a, 'answer', put)
+    if (put.length) {
+      parametersRecovered += put.length
+      log('  ⚠ recovered ' + put.join(', ') + ' from a swallowed close tag in `answer`')
+    }
     if (a && a.confidence === undefined) a.confidence = 'low'
     if (a && a.settled === undefined) a.settled = false
     // The belief update can degenerate exactly like the synthesis does: measured
@@ -1098,7 +1107,12 @@ const report = await agent(
 // `</answer>` eats here. `findings` is deliberately left absent when it cannot be
 // parsed back, so the check below routes to the raw-claim salvage instead of shipping
 // a silently empty report.
-unswallow(report, 'answer')
+const putBack = []
+unswallow(report, 'answer', putBack)
+if (putBack.length) {
+  parametersRecovered += putBack.length
+  log('⚠ recovered ' + putBack.join(', ') + ' from a swallowed close tag in the report answer')
+}
 // Keep the returned shape stable now that `findings` is not required: absent and empty are
 // the same thing to the check below, but a missing key would reach the caller as a silently
 // absent field rather than an honestly empty list.
@@ -1124,7 +1138,8 @@ if (!report || degenerate) {
     findings: surviving.map(c => ({ finding: c.claim, confidence: c.confidence, sources: [c.sourceUrl], evidence: c.quote })),
     killed: killedClaims.map(c => ({ claim: c.claim, problems: c.problems })), gaps, stopReason,
     stats: { agents: used, cap: cfg.agents, droppedUnsourced, roundsRun,
-             beliefUpdates: assessments.length, degenerateAssessments, claimsAudited: audited.length },
+             beliefUpdates: assessments.length, degenerateAssessments, parametersRecovered,
+             claimsAudited: audited.length },
   }
 }
 
@@ -1155,7 +1170,7 @@ return {
     // Three different numbers that used to be one: rounds executed, belief updates
     // accepted, and belief updates thrown away. Reporting only the accepted count
     // as "roundsRun" made a discarded update look like a round that never ran.
-    roundsRun, beliefUpdates: assessments.length, degenerateAssessments,
+    roundsRun, beliefUpdates: assessments.length, degenerateAssessments, parametersRecovered,
     anglesTried: tried.length,
     claimsExtracted: findings.length, slotsCovered: slots.size,
     droppedUnsourced,
