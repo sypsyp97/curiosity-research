@@ -891,8 +891,17 @@ for (let round = 1; round <= cfg.rounds; round++) {
     stallCount++
     // Pivot structure, not tactics: name the constraint to break, not a better
     // query. `rare` above then biases the next batch toward the least-used kind.
+    // Name the spent ground too: told only to "change something structural", the
+    // planner re-proposed the same lineage in other words, which `admit()` then
+    // rejected at 0.85 overlap — the round was spent proposing, not searching.
+    // Both lists come from state already tracked, so this costs no agent.
+    const barren = [...new Set(batch.map(e => e.origin || e.label))].slice(0, 6).map(quoted)
+    const spentHosts = [...new Set(tried.map(t => hostOf(t.query)).filter(Boolean))].slice(0, 8)
     pivotNote =
       'The last ' + stale + ' round(s) produced no new fact — only restatements of what was already known. ' +
+      (barren.length ? 'These angles were just tried and produced nothing; do not re-propose them under other wording: ' +
+        barren.join(', ') + '. ' : '') +
+      (spentHosts.length ? 'Hosts already consulted: ' + spentHosts.join(', ') + '. ' : '') +
       'Do not propose a better-worded version of the same search. Change a structural constraint instead: ' +
       'a different KIND of source (the artifact itself instead of writing about it, an issue tracker or ' +
       'changelog instead of a paper), a different entity name or spelling, a different language, a different ' +
