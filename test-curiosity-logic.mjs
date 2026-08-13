@@ -257,4 +257,25 @@ chk('valid cross-source pair accepted', acceptPair(SH,{a:0,b:1}))
 chk('out-of-range index rejected', !acceptPair(SH,{a:0,b:9}))
 chk('same-claim pair rejected', !acceptPair(SH,{a:1,b:1}))
 chk('same-source pair rejected', !acceptPair(SH,{a:0,b:2}))
+// ── report rendering: audit status is stated for EVERY claim, and truncation is declared
+// (copied from curiosity-research.js — a clean audit that renders as nothing is what made a
+// run recount coverage from visible verdicts and report 15% where the harness had done 47%)
+const auditLine = c =>
+  c.problems?.includes('not audited') ? 'audit: NOT CHECKED — treat as unverified\n'
+    : c.problems?.length ? 'audit: FLAGGED — ' + c.problems.join(' | ') + '\n'
+      : 'audit: verified against the cited source, no problems found\n'
+chk('audited-clean claim says verified', auditLine({problems: []}).includes('verified'))
+chk('claim with no problems field says verified', auditLine({}).includes('verified'))
+chk('flagged claim names the problem', auditLine({problems: ['overstated']}).includes('FLAGGED — overstated'))
+chk('unaudited claim says NOT CHECKED', auditLine({problems: ['not audited']}).includes('NOT CHECKED'))
+chk('verified and unaudited are distinguishable',
+    auditLine({problems: []}) !== auditLine({problems: ['not audited']}))
+
+const CAP = 40
+const header = surv => { const shown = surv.slice(0, CAP), om = surv.length - shown.length
+  return shown.length + (om ? ' shown of ' + surv.length + '; the ' + om + ' omitted' : '') }
+chk('no truncation prints one number', header(new Array(12).fill(0)) === '12')
+chk('truncation declares both numbers', header(new Array(63).fill(0)) === '40 shown of 63; the 23 omitted')
+chk('exactly at the cap does not claim truncation', header(new Array(40).fill(0)) === '40')
+
 console.log(`\n--- ${p}/${p+f} passed (slot mechanism replaced) ---`); process.exit(f?1:0)

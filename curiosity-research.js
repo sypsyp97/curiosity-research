@@ -996,15 +996,31 @@ const killedClaims = audited.filter(a => a.killed)
 phase('Synthesize')
 spend(1)
 const surprising = findings.filter(f => (f.surprise ?? 0) >= 0.7)
+// Every claim states its audit status, including the clean ones. Rendering only the
+// FLAGGED verdicts is what made a run report 15% coverage when the harness had audited
+// 47%: a verified claim looked exactly like an unchecked one, so the reader recounted
+// from what it could see and produced a wrong, pessimistic caveat — and it was right to
+// trust its own eyes over a number the list appeared to contradict.
+const auditLine = c =>
+  c.problems?.includes('not audited') ? 'audit: NOT CHECKED — treat as unverified\n'
+    : c.problems?.length ? 'audit: FLAGGED — ' + c.problems.join(' | ') + '\n'
+      : 'audit: verified against the cited source, no problems found\n'
+const CLAIM_CAP = 40
+const shownClaims = surviving.slice(0, CLAIM_CAP)
+const omittedClaims = surviving.length - shownClaims.length
 const report = await agent(
   '## Research report\n\n**Question:** ' + QUESTION + '\n\n' +
   (working ? '## The run\'s own current answer (confidence ' + working.confidence + ')\n' + fenced(working.answer) + '\n\n' : '') +
-  '## Surviving claims (' + surviving.length + ')\n' +
-  surviving.slice(0, 40).map((c, i) => '### [' + i + '] ' + strip(c.claim) + '\n' +
+  // The count and the list have to agree or the reader cannot use either: printing the
+  // full total above a truncated list reads as an inconsistency in the evidence itself.
+  '## Surviving claims (' + shownClaims.length +
+  (omittedClaims ? ' shown of ' + surviving.length + '; the ' + omittedClaims +
+    ' omitted are the unaudited tail, ranked last on purpose — say so if it matters' : '') + ')\n' +
+  shownClaims.map((c, i) => '### [' + i + '] ' + strip(c.claim) + '\n' +
     'confidence: ' + c.confidence + ' · source: ' + c.sourceUrl + ' (' + c.sourceQuality + ')' +
     (c.publishDate ? ' · ' + c.publishDate : '') + '\n' +
     (c.quote ? 'quote: ' + fenced(c.quote) + '\n' : '') +
-    (c.problems?.length ? 'auditor: ' + c.problems.join(' | ') + '\n' : '')).join('\n') + '\n\n' +
+    auditLine(c)).join('\n') + '\n\n' +
   (surprising.length ? '## Where the run\'s expectations broke\n' +
     surprising.slice(0, 10).map(f => '- ' + strip(f.slot) + ': ' + strip(f.surpriseNote || f.claim).slice(0, 200)).join('\n') + '\n\n' : '') +
   (killedClaims.length ? '## Killed by audit — do not reuse these\n' +
@@ -1018,8 +1034,11 @@ const report = await agent(
   '4. Mark `surprising: true` where a finding contradicted the run\'s stated priors. Those are the decision-relevant ' +
   'ones and must not be smoothed into the consensus.\n' +
   '5. `caveats`: weak sourcing, time-sensitivity, gaps left unchased. State the audit coverage plainly — ' +
-  Math.round(100 * audited.length / Math.max(1, surviving.length + killedClaims.length)) + '% of claims were checked against their cited source' +
-  (failures ? ', and ' + failures + ' retrieval agent(s) returned nothing' : '') + ' — a reader cannot infer that from the findings.\n' +
+  Math.round(100 * audited.length / Math.max(1, surviving.length + killedClaims.length)) + '% of claims (' +
+  audited.length + ' of ' + (surviving.length + killedClaims.length) + ') were checked against their cited source' +
+  (failures ? ', and ' + failures + ' retrieval agent(s) returned nothing' : '') + '. That figure is the harness\'s ' +
+  'own count over the WHOLE pool including any claims omitted from the list above; report it as given rather than ' +
+  're-deriving a coverage number by counting audit lines, which undercounts.\n' +
   '6. `openQuestions`: where a follow-up run should start, including every blocking gap.\n' +
   '7. Use comparison tables when several systems are compared on the same axes — dense tables beat prose.\n' +
   '8. If you are running short of room, cut prose from `answer`. Never drop `findings` — an empty findings array ' +
