@@ -202,9 +202,15 @@ const asValue = v => {
 // "the slip did not happen", which is the only question a verification run can answer.
 const unswallow = (obj, field, recovered) => {
   if (!obj || typeof obj[field] !== 'string') return obj
-  // The remainder must be empty or start with `<parameter`, which is what keeps a
-  // stray `</answer>` inside prose from truncating a legitimate answer.
+  // Two distinct slips leave a swallowed tail. (a) The model closes the long field
+  // with a name-matching tag (`</answer>`) instead of the parameter close. (b) The
+  // model writes every close tag but drops the namespace prefix on the inner ones,
+  // so the parser never sees a close and the value carries whole plain
+  // `</parameter><parameter …>` blocks (observed on `restated`, 2026-08-19). In both
+  // the remainder must be parameter markup — that is what keeps a stray close tag
+  // inside prose from truncating a legitimate value.
   const m = obj[field].match(new RegExp('</' + field + '>\\s*((?:<parameter\\b[\\s\\S]*)?)$', 'i'))
+        || obj[field].match(/<\/parameter>\s*(<parameter\b[\s\S]*)$/i)
   if (!m) return obj
   obj[field] = obj[field].slice(0, m.index).trimEnd()
   for (const p of m[1].matchAll(
@@ -267,8 +273,12 @@ const FINDINGS = {
     newEntries: { type: 'array', maxItems: 3, items: ENTRY },
   },
 }
+// Nothing is required: `restated` is emitted first and long, so a swallowed close
+// tag can take any later field down with it — including `entries` — and the model
+// has also been seen omitting the prose fields while delivering perfectly good
+// entries. Either shape must reach the call site, which recovers or aborts there.
 const PLAN = {
-  type: 'object', required: ['restated', 'strategy', 'entries'],
+  type: 'object', required: [],
   properties: {
     restated: { type: 'string' },
     strategy: { type: 'string' },
@@ -635,8 +645,9 @@ spendExplore(1)
 const plan = await agent(
   '## Research planner\n\nQuestion: "' + QUESTION + '"\n\n' +
   '## Task\n' +
-  '1. Restate the question. If a term is ambiguous or looks mis-transcribed, resolve it in `ambiguity` in one line — ' +
-  'researching the wrong thing is the most expensive failure here.\n' +
+  '1. Restate the question in two sentences at most — do not reproduce it. If a term is ambiguous or looks ' +
+  'mis-transcribed, resolve it in `ambiguity` in one line — researching the wrong thing is the most expensive ' +
+  'failure here.\n' +
   '2. State your decomposition strategy in one or two sentences.\n' +
   '3. Produce ' + cfg.seedScouts + '-8 frontier entries covering complementary angles (broad · academic · recent · ' +
   'contrarian · practitioner · benchmark/limitation, or whatever the domain calls for). Use kind "search" for a web ' +
@@ -647,6 +658,16 @@ const plan = await agent(
   { label: 'plan', phase: 'Seed', schema: PLAN, ...cfg.roles.plan }
 )
 if (!plan) return { error: 'Planner returned nothing — cannot seed the frontier.' }
+// Same slip as the assessor's `</answer>`: a long `restated` closed with `</restated>`
+// swallows every parameter after it, `entries` included. Recover before judging.
+const planPut = []
+unswallow(plan, 'restated', planPut)
+if (planPut.length) {
+  parametersRecovered += planPut.length
+  log('  ⚠ recovered ' + planPut.join(', ') + ' from a swallowed close tag in `restated`')
+}
+if (!Array.isArray(plan.entries) || plan.entries.length === 0)
+  return { error: 'Planner produced no frontier entries (restated=' + String(plan.restated || '').length + ' chars).' }
 log('Q: ' + QUESTION.slice(0, 90))
 if (plan.ambiguity) log('resolved: ' + plan.ambiguity)
 frontier = (plan.entries || []).filter(e => admit(e)).map(e => ({ ...e, depth: 0, origin: e.label }))

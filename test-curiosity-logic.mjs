@@ -290,9 +290,15 @@ const asValue = v => {
 }
 const unswallow = (obj, field, recovered) => {
   if (!obj || typeof obj[field] !== 'string') return obj
-  // The remainder must be empty or start with `<parameter`, which is what keeps a
-  // stray `</answer>` inside prose from truncating a legitimate answer.
+  // Two distinct slips leave a swallowed tail. (a) The model closes the long field
+  // with a name-matching tag (`</answer>`) instead of the parameter close. (b) The
+  // model writes every close tag but drops the namespace prefix on the inner ones,
+  // so the parser never sees a close and the value carries whole plain
+  // `</parameter><parameter …>` blocks (observed on `restated`, 2026-08-19). In both
+  // the remainder must be parameter markup — that is what keeps a stray close tag
+  // inside prose from truncating a legitimate value.
   const m = obj[field].match(new RegExp('</' + field + '>\\s*((?:<parameter\\b[\\s\\S]*)?)$', 'i'))
+        || obj[field].match(/<\/parameter>\s*(<parameter\b[\s\S]*)$/i)
   if (!m) return obj
   obj[field] = obj[field].slice(0, m.index).trimEnd()
   for (const p of m[1].matchAll(
@@ -340,6 +346,25 @@ chk('recovery never overwrites a value that arrived intact',
       .confidence === 'high')
 chk('a non-string field is a no-op', unswallow({answer: 42}, 'answer').answer === 42)
 chk('a null result does not throw', unswallow(null, 'answer') === null)
+
+// the namespace-drop shape measured on the 2026-08-19 planner: every close tag written,
+// none of the inner ones parsed, the whole tail swallowed with no `</restated>` anchor
+const nsDrop = unswallow({
+  restated: 'The question asks which cell wins.</parameter>\n<parameter name="strategy">Split by claim.</parameter>\n' +
+    '<parameter name="entries">[{"label":"a","kind":"search"}]</parameter>\n</invoke>',
+}, 'restated')
+chk('namespace-drop: restated is truncated at the orphan close',
+    nsDrop.restated === 'The question asks which cell wins.', JSON.stringify(nsDrop.restated))
+chk('namespace-drop: the prose rider is recovered', nsDrop.strategy === 'Split by claim.')
+chk('namespace-drop: the array rider is parsed, not stored as a string',
+    Array.isArray(nsDrop.entries) && nsDrop.entries[0].label === 'a')
+chk('an orphan close tag inside prose with no parameter after it is untouched',
+    unswallow({restated: 'we saw </parameter> in a log once, then more prose'}, 'restated').restated ===
+      'we saw </parameter> in a log once, then more prose')
+chk('the name-matching close tag still wins when both shapes are present', (() => {
+  const o = unswallow({answer: 'body</answer>\n<parameter name="confidence">low'}, 'answer')
+  return o.answer === 'body' && o.confidence === 'low'
+})())
 
 // a repair in a live run has to be countable, or a green run cannot be told apart from a run
 // where the slip simply never happened

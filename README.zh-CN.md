@@ -68,7 +68,7 @@ curl -fsSL -o ~/.claude/workflows/curiosity-research.js \
 ## 测试
 
 ```bash
-node test-curiosity-logic.mjs   # 96 个用例
+node test-curiosity-logic.mjs   # 101 个用例
 ```
 
 ## 许可
