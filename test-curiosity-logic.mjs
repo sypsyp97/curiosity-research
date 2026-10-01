@@ -162,7 +162,7 @@ chk('the final round still returns the belief and the gaps',
 // ── injected local notes are not sources. A wiki-style [[link]] is the one
 // mechanically detectable trace, because no web source writes them.
 const localRefs=o=>(JSON.stringify(o).match(/\[\[[^\]]{1,80}\]\]/g)||[]).length
-chk('a wiki link in the answer is counted', localRefs({answer:'per [[closed-loop-eval-noise-floor]], 86.4%'}) === 1)
+chk('a wiki link in the answer is counted', localRefs({answer:'per [[example-note]], 12.5%'}) === 1)
 chk('a wiki link nested in findings is counted too',
     localRefs({findings:[{evidence:'see [[a]] and [[b]]'}]}) === 2)
 chk('a clean report counts zero', localRefs({answer:'OpenVLA runs 3 seeds x 500 trials'}) === 0)
