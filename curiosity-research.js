@@ -435,6 +435,7 @@ const tried = []                // {label, query} of every dispatched entry
 const assessments = []
 const audited = []               // accumulated across in-round audits and the final one
 const auditedOf = new Set()      // claim text already audited
+const auditFailures = new Map()  // Failed source reads stay eligible for another audit.
 let frontier = []
 let stale = 0                    // consecutive rounds that produced no new fact
 let stallCount = 0               // TOTAL stalls; `stale` is only the live streak
@@ -588,7 +589,7 @@ const runAudit = async (pool, agentsAvailable, tag) => {
       ' sources × ' + votes + ' votes (' + fresh.length + ' unaudited in pool)')
   const done = (await parallel(take.map(g => () =>
     parallel(Array.from({ length: votes }, (_, v) => () =>
-      agent(P.verify(g.claims, g.url, g.quality, v, votes), { label: 'audit:' + safeLabel(g.url, g.url), phase: 'Verify', schema: AUDIT_BATCH, ...cfg.roles.verify })
+      agent(P.verify(g.claims, g.url, g.quality, v, votes), { label: 'audit:' + safeLabel(g.url, g.url), phase: 'Verify', schema: AUDIT_BATCH, ...cfg.roles.verify, model: 'sonnet' })
     )).then(batches => {
       failures += batches.filter(b => !b).length
       // Regroup one-verdict-per-claim batches into per-claim vote lists, matching
@@ -598,12 +599,20 @@ const runAudit = async (pool, agentsAvailable, tag) => {
       // wrong one. A claim nobody addressed returns null and stays unaudited, so
       // the final sweep can still reach it.
       return g.claims.map((c, i) => {
-        const valid = []
+        const valid = [], failed = []
         for (const b of batches) {
           const v = b && (b.verdicts || []).find(x => x && x.index === i)
-          if (v) valid.push(v)
+          if (v && v.quoteFound !== 'could-not-open') valid.push(v)
+          else {
+            const evidence = v && typeof v.evidence === 'string' ? strip(v.evidence).slice(0, 200) : ''
+            failed.push('source check failed: ' + (evidence || (v ? 'no failure evidence returned' : 'no verdict returned')))
+          }
         }
-        if (!valid.length) return null
+        if (!valid.length) {
+          auditFailures.set(c.claim, failed.join('; '))
+          return null
+        }
+        auditFailures.delete(c.claim)
         auditedOf.add(c.claim)
         const bad = valid.filter(v => v.problem !== 'none')
         // A quote nobody can find in the cited source is a citation defect even
@@ -625,8 +634,10 @@ const runAudit = async (pool, agentsAvailable, tag) => {
         return {
           ...c, killed, votesValid: valid.length, miscited: misCited.length >= bar,
           confidence: killed ? 'low'
-            : (bad.length === 0 && !valid.some(v => v.quoteFound === 'paraphrase-only')) ? 'high' : 'medium',
+            : (valid.length === votes && bad.length === 0 && !valid.some(v => v.quoteFound === 'paraphrase-only')) ? 'high' : 'medium',
           problems: [...(misCited.length >= bar ? ['the cited source does not say this'] : []),
+                     ...(valid.length < votes ? ['incomplete audit: ' + valid.length + '/' + votes + ' source checks succeeded'] : []),
+                     ...failed,
                      ...(valid.some(v => v.quoteFound === 'paraphrase-only') ? ['quote is a paraphrase, not the source\'s words'] : []),
                      ...bad.map(v => v.problem + ': ' + strip(v.evidence).slice(0, 200))],
         }
@@ -655,7 +666,7 @@ const plan = await agent(
   '4. Every entry needs a prior: what you expect to find, and how confident you are ("none" is an honest answer). ' +
   'The whole run measures surprise against these, so a vague prior makes its entry unmeasurable — commit to ' +
   'something falsifiable even at low confidence.\n\n' + RULES,
-  { label: 'plan', phase: 'Seed', schema: PLAN, ...cfg.roles.plan }
+  { label: 'plan', phase: 'Seed', schema: PLAN, ...cfg.roles.plan, model: 'sonnet' }
 )
 if (!plan) return { error: 'Planner returned nothing — cannot seed the frontier.' }
 // Same slip as the assessor's `</answer>`: a long `restated` closed with `</restated>`
@@ -819,9 +830,11 @@ for (let round = 1; round <= cfg.rounds; round++) {
     const order = pivotNote ? [...from].sort((a, b) => (b.kind === rare ? 1 : 0) - (a.kind === rare ? 1 : 0)) : from
     for (const e of order) {
       if (taken.length >= n) break
+      if (!admit(e)) continue
       const o = e.origin || e.label
       if ((byOrigin.get(o) ?? 0) >= perOrigin) continue
       byOrigin.set(o, (byOrigin.get(o) ?? 0) + 1)
+      reserve(e)
       taken.push(e)
     }
     return taken
@@ -832,20 +845,19 @@ for (let round = 1; round <= cfg.rounds; round++) {
   if (batch.length === 0) { stopReason = 'nothing affordable to dispatch'; break }
 
   frontier = ranked.filter(e => !curious.includes(e) && !cover.includes(e))
-  batch.forEach(e => { if (e.kind !== 'conflict') reserve(e) })
   spendExplore(batch.length)
   log('round ' + round + ': ' + batch.length + ' agents (' + pending.length + ' conflict, ' + curious.length +
       ' curiosity, ' + cover.length + ' coverage) · ' + used + '/' + cfg.agents)
 
   const out = (await parallel(batch.map(e => () => {
     if (e.kind === 'conflict') {
-      return agent(P.conflict(e.conflict), { label: 'reconcile:' + safeLabel('', e.conflict.slot), phase: 'Explore', schema: RECONCILE, ...cfg.roles.reconcile })
+      return agent(P.conflict(e.conflict), { label: 'reconcile:' + safeLabel('', e.conflict.slot), phase: 'Explore', schema: RECONCILE, ...cfg.roles.reconcile, model: 'sonnet' })
         .then(r => { if (!r) failures++; return r && { type: 'conflict', entry: e, res: r } })
         .catch(() => { failures++; return null })
     }
     const role = e.kind === 'search' ? 'scout' : e.kind === 'primary' ? 'primary' : 'read'
     const label = 'r' + round + ':' + (e.kind === 'search' ? strip(e.label).slice(0, 28) : safeLabel(e.query, e.label))
-    return agent(P[e.kind](e), { label, phase: 'Explore', schema: FINDINGS, ...cfg.roles[role] })
+    return agent(P[e.kind](e), { label, phase: 'Explore', schema: FINDINGS, ...cfg.roles[role], model: 'sonnet' })
       .then(r => { if (!r) failures++; return r && { type: 'find', entry: e, res: r } })
       .catch(err => { failures++; log('failed: ' + strip(e.label) + ' — ' + (err.message || err)); return null })
   }))).filter(Boolean)
@@ -1001,7 +1013,7 @@ for (let round = 1; round <= cfg.rounds; round++) {
       (pivotNote ? '## Stall — a structural pivot is required\n' + pivotNote + '\n\n' : '') +
       'Angles already tried: ' + tried.map(t => strip(t.label)).join(' · ') + '\n\n' +
       '## Task\n' + tasks.map((t, i) => (i + 1) + '. ' + t).join('\n') + '\n\n' + RULES,
-      { label: 'assess:r' + round, phase: 'Explore', schema: ASSESS, ...cfg.roles.assess }
+      { label: 'assess:r' + round, phase: 'Explore', schema: ASSESS, ...cfg.roles.assess, model: 'sonnet' }
     )
     // Put back whatever a swallowed `</answer>` carried off, then default what is
     // still missing. `settled` defaults false in particular: an assessment whose own
@@ -1075,7 +1087,8 @@ log('audit total: ' + audited.length + '/' + candidates.length + ' claims · ' +
 const auditedClaims = new Set(audited.map(a => a.claim))
 const surviving = [
   ...audited.filter(a => !a.killed),
-  ...findings.filter(f => !auditedClaims.has(f.claim)).map(f => ({ ...f, confidence: f.sourceQuality === 'primary' ? 'medium' : 'low', problems: ['not audited'] })),
+  ...findings.filter(f => !auditedClaims.has(f.claim)).map(f => ({ ...f, confidence: f.sourceQuality === 'primary' ? 'medium' : 'low',
+    problems: ['not audited', ...(auditFailures.has(f.claim) ? [auditFailures.get(f.claim)] : [])] })),
 ]
 const killedClaims = audited.filter(a => a.killed)
 
@@ -1089,7 +1102,7 @@ const surprising = findings.filter(f => (f.surprise ?? 0) >= 0.7)
 // from what it could see and produced a wrong, pessimistic caveat — and it was right to
 // trust its own eyes over a number the list appeared to contradict.
 const auditLine = c =>
-  c.problems?.includes('not audited') ? 'audit: NOT CHECKED — treat as unverified\n'
+  c.problems?.includes('not audited') ? 'audit: NOT CHECKED — treat as unverified; ' + c.problems.join(' | ') + '\n'
     : c.problems?.length ? 'audit: FLAGGED — ' + c.problems.join(' | ') + '\n'
       : 'audit: verified against the cited source, no problems found\n'
 const CLAIM_CAP = 40
@@ -1130,7 +1143,7 @@ const report = await agent(
   '7. Use comparison tables when several systems are compared on the same axes — dense tables beat prose.\n' +
   '8. If you are running short of room, cut prose from `answer`. Never drop `findings` — an empty findings array ' +
   'discards the entire run.\n\n' + RULES,
-  { label: 'report', phase: 'Synthesize', schema: REPORT, ...cfg.roles.report }
+  { label: 'report', phase: 'Synthesize', schema: REPORT, ...cfg.roles.report, model: 'sonnet' }
 )
 
 // Same recovery as the assessor gets: `findings` and `caveats` are what a swallowed
@@ -1165,7 +1178,9 @@ if (!report || degenerate) {
     question: QUESTION,
     answer: (report ? 'Synthesis returned an empty report (schema-valid, no findings) — ' : 'Synthesis failed — ') +
       'returning ' + surviving.length + ' surviving claims raw.' + (working ? ' The run\'s own last answer: ' + working.answer : ''),
-    findings: surviving.map(c => ({ finding: c.claim, confidence: c.confidence, sources: [c.sourceUrl], evidence: c.quote })),
+    findings: surviving.map(c => ({ finding: c.claim, confidence: c.confidence, sources: [c.sourceUrl], evidence: c.quote,
+      auditProblems: c.problems })),
+    unverified: surviving.filter(c => c.problems?.includes('not audited')).map(c => ({ claim: c.claim, reasons: c.problems })),
     killed: killedClaims.map(c => ({ claim: c.claim, problems: c.problems })), gaps, stopReason,
     stats: { agents: used, cap: cfg.agents, droppedUnsourced, roundsRun,
              beliefUpdates: assessments.length, degenerateAssessments, parametersRecovered,
@@ -1184,6 +1199,7 @@ if (localRefs) log('⚠ report refers ' + localRefs + ' time(s) to the operator\
 return {
   question: QUESTION,
   ...report,
+  unverified: surviving.filter(c => c.problems?.includes('not audited')).map(c => ({ claim: c.claim, reasons: c.problems })),
   warnings: [
     ...(localRefs ? ['Cites the operator\'s own notes ' + localRefs + ' time(s). Those are injected context, not ' +
       'retrieved sources: anything resting on them is unverified here and reads as the operator\'s conclusion ' +
